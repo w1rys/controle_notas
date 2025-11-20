@@ -8,81 +8,120 @@ from openpyxl import load_workbook
 # Carregar Excel
 # ----------------------------------------------------------
 def carregar_excel(nome_excel):
-    """Carrega o Excel ou cria um novo DataFrame se não existir."""
-    if os.path.exists(nome_excel):
-        try:
-            df_produtos = pd.read_excel(nome_excel, parse_dates=["ultima_compra"])
-            return df_produtos
-        except Exception as e:
-            log_erro(f"Erro ao ler o arquivo Excel: {e}")
-            return None
-    else:
-        colunas = [
-            "codigo",
-            "nome_produto",
-            "quantidade_total_comprada",
-            "preco_medio",
-            "ultimo_preco",
-            "ultima_compra",
-            "chave_nota"
-        ]
-        return pd.DataFrame(columns=colunas)
+    """Carrega ou cria o Excel com a aba 'Compras'."""
+
+    colunas_base = [
+        "codigo",
+        "nome_produto",
+        "quantidade_total_comprada",
+        "ultimo_preco",
+        "penultimo_preco",
+        "ultima_compra",
+        "chave_nota"
+    ]
+
+    if not os.path.exists(nome_excel):
+        df = pd.DataFrame(columns=colunas_base)
+        df.to_excel(nome_excel, sheet_name="Compras", index=False)
+        log("[INFO] Arquivo Excel criado com aba 'Compras'.")
+        return df
+
+    try:
+        df = pd.read_excel(nome_excel, sheet_name="Compras", parse_dates=["ultima_compra"])
+
+        # adicionar colunas ausentes
+        for col in colunas_base:
+            if col not in df.columns:
+                df[col] = None
+
+        return df
+
+    except ValueError:
+        # Excel existe mas não tem aba Compras
+        df = pd.DataFrame(columns=colunas_base)
+        with pd.ExcelWriter(nome_excel, engine="openpyxl", mode="a") as writer:
+            df.to_excel(writer, sheet_name="Compras", index=False)
+        return df
 
 
 # ----------------------------------------------------------
-# Verificar duplicidade da nota
-# ----------------------------------------------------------
-def nota_ja_processada(df_produtos, chave_nota):
-    """Retorna True se a chave da nota já estiver registrada."""
-    if "chave_nota" not in df_produtos.columns:
-        return False
-    return chave_nota in df_produtos["chave_nota"].values
-
-
-# ----------------------------------------------------------
-# Salvar aba principal
+# Garantir datas sem timezone + salvar aba Compras
 # ----------------------------------------------------------
 def salvar_excel(df_produtos, nome_excel):
-    """Salva o DataFrame no arquivo Excel."""
     try:
-        df_produtos.to_excel(nome_excel, index=False)
-        log(f"Excel atualizado: {nome_excel}")
+        # Garantir datetime sem timezone
+        if "ultima_compra" in df_produtos.columns:
+            df_produtos["ultima_compra"] = pd.to_datetime(df_produtos["ultima_compra"], errors="coerce")
+
+            try:
+                if df_produtos["ultima_compra"].dt.tz is not None:
+                    df_produtos["ultima_compra"] = df_produtos["ultima_compra"].dt.tz_convert(None)
+            except:
+                df_produtos["ultima_compra"] = df_produtos["ultima_compra"].apply(
+                    lambda t: t.replace(tzinfo=None) if hasattr(t, "tzinfo") and t.tzinfo else t
+                )
+
+        # Criar se não existir arquivo
+        if not os.path.exists(nome_excel):
+            df_produtos.to_excel(nome_excel, sheet_name="Compras", index=False)
+            log("[INFO] Excel criado com aba 'Compras'.")
+            return
+
+        # Atualizar aba Compras
+        with pd.ExcelWriter(
+            nome_excel,
+            engine="openpyxl",
+            mode="a",
+            if_sheet_exists="replace"
+        ) as writer:
+            df_produtos.to_excel(writer, sheet_name="Compras", index=False)
+
+        log("[INFO] Aba 'Compras' atualizada.")
+
     except Exception as e:
         log_erro(f"Erro ao salvar o Excel: {e}")
 
 
 # ----------------------------------------------------------
-# Atualizar aba produtos_base (consulta)
+# Criar/Atualizar aba "Produtos"
 # ----------------------------------------------------------
-def atualizar_aba_produtos_base(df_produtos, nome_excel="produtos.xlsx"):
+def atualizar_aba_produtos(df_produtos, nome_excel="produtos.xlsx"):
     """
-    Cria ou atualiza a aba 'produtos_base' com:
-    codigo, nome_produto, ultimo_preco, preco_medio, preco_venda (manual)
+    ABA "Produtos":
+    - codigo
+    - nome_produto
+    - ultimo_preco
+    - penultimo_preco
+    - preco_venda (manual)
     """
 
     df_base = df_produtos[[
         "codigo",
         "nome_produto",
         "ultimo_preco",
-        "preco_medio"
+        "penultimo_preco"
     ]].copy()
 
-    # Ordena por nome
+    # preencher penúltimo preço caso esteja vazio
+    df_base["penultimo_preco"] = df_base.apply(
+        lambda row: row["ultimo_preco"] if pd.isna(row["penultimo_preco"]) else row["penultimo_preco"],
+        axis=1
+    )
+
     df_base = df_base.sort_values(by="nome_produto", ascending=True)
 
-    aba = "produtos_base"
+    aba = "Produtos"
 
     try:
         book = load_workbook(nome_excel)
 
-        # Se a aba já existir, preservar preco_venda
+        # Preservar preco_venda existente
         if aba in book.sheetnames:
-            df_antigo = pd.read_excel(nome_excel, sheet_name=aba)
+            antigo = pd.read_excel(nome_excel, sheet_name=aba)
 
-            # Se preco_venda já existir, manter
-            if "preco_venda" in df_antigo.columns:
+            if "preco_venda" in antigo.columns:
                 df_base = df_base.merge(
-                    df_antigo[["codigo", "preco_venda"]],
+                    antigo[["codigo", "preco_venda"]],
                     on="codigo",
                     how="left"
                 )
@@ -91,89 +130,70 @@ def atualizar_aba_produtos_base(df_produtos, nome_excel="produtos.xlsx"):
         else:
             df_base["preco_venda"] = None
 
-        # Salvar aba
-        with pd.ExcelWriter(nome_excel, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
+        with pd.ExcelWriter(
+            nome_excel,
+            engine="openpyxl",
+            mode="a",
+            if_sheet_exists="replace"
+        ) as writer:
             df_base.to_excel(writer, sheet_name=aba, index=False)
 
     except FileNotFoundError:
-        # Se o arquivo não existir ainda
         df_base["preco_venda"] = None
         df_base.to_excel(nome_excel, sheet_name=aba, index=False)
 
 
 # ----------------------------------------------------------
-# Atualizar Excel principal (controle de compras)
+# Atualizar Excel após leitura da nota
 # ----------------------------------------------------------
 def atualizar_excel_compras(novos_produtos, chave_nota, nome_excel="produtos.xlsx"):
-    """
-    Atualiza o Excel com informações das notas:
-    - quantidade total comprada
-    - média ponderada
-    - último preço
-    - última compra
-    - chave da nota
-    """
-
-    df_produtos = carregar_excel(nome_excel)
-    if df_produtos is None:
-        return
+    df = carregar_excel(nome_excel)
 
     # Evitar duplicidade
-    if nota_ja_processada(df_produtos, chave_nota):
-        log(f"Nota já registrada. Ignorando importação: {chave_nota}")
+    if chave_nota in df["chave_nota"].astype(str).values:
+        log(f"[INFO] Nota {chave_nota} já registrada – ignorando.")
         return
 
-    # Processar cada produto da nota
     for item in novos_produtos:
         codigo = item["codigo"]
-        quantidade_nova = item["quantidade"]
+        qtd_nova = item["quantidade"]
         preco_novo = item["preco_unitario"]
         data_nova = item["data_compra"]
 
-        produto_existente = df_produtos[df_produtos["codigo"] == codigo]
+        existente = df[df["codigo"] == codigo]
 
-        if not produto_existente.empty:
-            indice = produto_existente.index[0]
+        if not existente.empty:
+            idx = existente.index[0]
 
-            quantidade_antiga = df_produtos.loc[indice, "quantidade_total_comprada"]
-            preco_medio_antigo = df_produtos.loc[indice, "preco_medio"]
+            qtd_antiga = df.loc[idx, "quantidade_total_comprada"]
+            total_qtd = qtd_antiga + qtd_nova
 
-            quantidade_total = quantidade_antiga + quantidade_nova
+            df.loc[idx, "quantidade_total_comprada"] = total_qtd
 
-            # média ponderada
-            novo_preco_medio = (
-                (quantidade_antiga * preco_medio_antigo) +
-                (quantidade_nova * preco_novo)
-            ) / quantidade_total
+            # Penúltimo preço
+            ultimo_antigo = df.loc[idx, "ultimo_preco"]
 
-            # Atualizar
-            df_produtos.loc[indice, "quantidade_total_comprada"] = quantidade_total
-            df_produtos.loc[indice, "preco_medio"] = novo_preco_medio
+            if pd.isna(df.loc[idx, "penultimo_preco"]) or df.loc[idx, "penultimo_preco"] in [None, 0]:
+                df.loc[idx, "penultimo_preco"] = ultimo_antigo
+            else:
+                df.loc[idx, "penultimo_preco"] = ultimo_antigo
 
-            # Atualizar último preço/data
-            if pd.isna(df_produtos.loc[indice, "ultima_compra"]) or data_nova > df_produtos.loc[indice, "ultima_compra"]:
-                df_produtos.loc[indice, "ultimo_preco"] = preco_novo
-                df_produtos.loc[indice, "ultima_compra"] = data_nova
+            # Último preço
+            df.loc[idx, "ultimo_preco"] = preco_novo
+            df.loc[idx, "ultima_compra"] = data_nova
 
         else:
-            # Criar novo produto
-            df_produtos.loc[len(df_produtos)] = {
+            df.loc[len(df)] = {
                 "codigo": codigo,
                 "nome_produto": item["nome_produto"],
-                "quantidade_total_comprada": quantidade_nova,
-                "preco_medio": preco_novo,
+                "quantidade_total_comprada": qtd_nova,
                 "ultimo_preco": preco_novo,
+                "penultimo_preco": preco_novo,  # agora sempre recebe último
                 "ultima_compra": data_nova,
                 "chave_nota": chave_nota
             }
 
-    # ------------------------------------------------------
-    # ORDENAR A ABA PRINCIPAL POR NOME
-    # ------------------------------------------------------
-    df_produtos = df_produtos.sort_values(by="nome_produto", ascending=True)
+    df = df.sort_values(by="nome_produto", ascending=True)
 
-    # Salvar aba principal
-    salvar_excel(df_produtos, nome_excel)
-
-    # Atualizar aba secundária
-    atualizar_aba_produtos_base(df_produtos, nome_excel)
+    salvar_excel(df, nome_excel)
+    atualizar_aba_produtos(df, nome_excel)

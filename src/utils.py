@@ -13,7 +13,7 @@ def log_erro(msg):
 
 def extrair_data_nota(data_xml):
     """
-    Recebe dhEmi ou dEmi e converte para datetime.
+    Recebe dhEmi ou dEmi e converte para datetime (sempre timezone-naive).
     Suporta:
     - Formato moderno: 2024-01-15T12:22:00-03:00
     - Formato antigo: 2024-01-15
@@ -24,12 +24,22 @@ def extrair_data_nota(data_xml):
     try:
         # Formato ISO moderno
         if "T" in data_xml:
-            return datetime.fromisoformat(data_xml.replace("Z", ""))
+            dt = datetime.fromisoformat(data_xml.replace("Z", ""))
+            # remover timezone se tiver
+            if getattr(dt, "tzinfo", None) is not None:
+                try:
+                    # se for pandas Timestamp compatível, usar astimezone antes de dropar tzinfo
+                    dt = dt.astimezone(tz=None)
+                except Exception:
+                    pass
+                dt = dt.replace(tzinfo=None)
+            return dt
         # Formato simples AAAA-MM-DD
         return datetime.strptime(data_xml, "%Y-%m-%d")
-    except:
+    except Exception:
         log_erro(f"Falha ao converter data: {data_xml}")
         return None
+
 
 
 def extrair_chave_nota(inf):

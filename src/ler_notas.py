@@ -1,165 +1,114 @@
 import os
 import xmltodict
-import pandas as pd
-from datetime import datetime
-from pandas.api.types import DatetimeTZDtype
-
-# ----------------------------------------------------------
-# Extrair data da nota
-# ----------------------------------------------------------
-def extrair_data_nota(data_xml):
-    if not data_xml:
-        return None
-    try:
-        data = data_xml.replace("Z", "")
-        dt = datetime.fromisoformat(data)
-        # Remover timezone se existir
-        if dt.tzinfo is not None:
-            dt = dt.replace(tzinfo=None)
-        return dt
-    except:
-        try:
-            return datetime.strptime(data_xml, "%Y-%m-%d")
-        except:
-            return None
-
-# ----------------------------------------------------------
-# Extrair chave da NF-e
-# ----------------------------------------------------------
-def extrair_chave_nota(inf):
-    try:
-        id_nota = inf.get("@Id")  # Ex: "NFe35123456789..."
-        if id_nota and id_nota.startswith("NFe"):
-            return id_nota.replace("NFe", "")
-    except:
-        pass
-    return None
+from utils import (
+    log,
+    log_erro,
+    extrair_data_nota,
+    extrair_chave_nota,
+    validar_nota_nfe
+)
+from atualizar_excel import atualizar_excel_compras
 
 
 # ----------------------------------------------------------
-# Ler XML da nota e extrair produtos
+# Ler uma nota XML e extrair produtos
 # ----------------------------------------------------------
 def ler_xml(path_xml):
-    with open(path_xml, encoding="utf-8") as f:
-        xml = f.read()
-    data = xmltodict.parse(xml)
+    """
+    Lê um XML de NF-e, extrai:
+    - chave da nota
+    - data da compra
+    - itens
+    E retorna: (lista_produtos, chave_nota)
+    """
 
+    # Ler arquivo XML
+    try:
+        with open(path_xml, encoding="utf-8") as f:
+            xml = f.read()
+    except Exception as e:
+        log_erro(f"Erro ao abrir arquivo {path_xml}: {e}")
+        return [], None
+
+    # Interpretar XML
+    try:
+        data = xmltodict.parse(xml)
+    except Exception as e:
+        log_erro(f"Erro ao interpretar XML {path_xml}: {e}")
+        return [], None
+
+    # Validar estrutura
+    if not validar_nota_nfe(data):
+        log_erro(f"Arquivo ignorado (não é NF-e): {path_xml}")
+        return [], None
+
+    # Acessar bloco principal da NF-e
     try:
         inf = data["nfeProc"]["NFe"]["infNFe"]
     except:
-        inf = data["NFe"]["infNFe"]
+        try:
+            inf = data["NFe"]["infNFe"]
+        except:
+            log_erro(f"NF-e com estrutura inválida: {path_xml}")
+            return [], None
 
+    # ===============================
     # Extrair chave da nota
-    chave_acesso = extrair_chave_nota(inf)
+    # ===============================
+    chave = extrair_chave_nota(inf)
+    if not chave:
+        log_erro(f"Chave da nota não encontrada: {path_xml}")
+        return [], None
 
-    # Extrair data
+    # ===============================
+    # Extrair data de emissão
+    # ===============================
     data_emissao = extrair_data_nota(
-        inf.get("ide", {}).get("dhEmi") or
-        inf.get("ide", {}).get("dEmi")
+        inf.get("ide", {}).get("dhEmi") or inf.get("ide", {}).get("dEmi")
     )
 
-    # Itens
+    # ===============================
+    # Extrair lista de itens
+    # ===============================
     itens = inf["det"]
-    if isinstance(itens, dict):
+    if isinstance(itens, dict):  # Se tiver apenas 1 item
         itens = [itens]
 
-    produtos_extraidos = []
+    produtos = []
+
     for item in itens:
         prod = item["prod"]
-        produtos_extraidos.append({
-            "codigo": prod.get("cProd", ""),
-            "nome_produto": prod.get("xProd", ""),
+
+        produtos.append({
+            "codigo": str(prod.get("cProd", "")).strip(),
+            "nome_produto": prod.get("xProd", "").strip(),
             "quantidade": float(prod.get("qCom", 0)),
             "preco_unitario": float(prod.get("vUnCom", 0)),
             "data_compra": data_emissao,
-            "chave_nota": chave_acesso
+            "chave_nota": chave
         })
 
-    return produtos_extraidos, chave_acesso
+    log(f"Nota processada: {os.path.basename(path_xml)}")
+
+    return produtos, chave
 
 
 # ----------------------------------------------------------
-# Atualizar Excel (controle de compras, sem estoque)
+# Ler toda a pasta "notas" (modo manual, sem monitor)
 # ----------------------------------------------------------
-def atualizar_excel_compras(novos_produtos, chave_nota, nome_excel="produtos.xlsx"):
-
-    # Carregar Excel
-    if os.path.exists(nome_excel):
-        df_produtos = pd.read_excel(nome_excel, parse_dates=["ultima_compra"])
-    else:
-        df_produtos = pd.DataFrame(columns=[
-            "codigo", "nome_produto",
-            "quantidade_total_comprada",
-            "preco_medio",
-            "ultimo_preco",
-            "ultima_compra",
-            "chave_nota"
-        ])
-
-    # Verificar duplicidade pela chave da nota
-    if chave_nota in df_produtos["chave_nota"].values:
-        print("Nota já registrada. Ignorando:", chave_nota)
-        return
-
-    for item in novos_produtos:
-        codigo = item["codigo"]
-        quantidade_nova = item["quantidade"]
-        preco_novo = item["preco_unitario"]
-        data_nova = item["data_compra"]
-
-        if codigo in df_produtos["codigo"].values:
-            indice = df_produtos[df_produtos["codigo"] == codigo].index[0]
-
-            quantidade_antiga = df_produtos.loc[indice, "quantidade_total_comprada"]
-            preco_medio_antigo = df_produtos.loc[indice, "preco_medio"]
-
-            novo_preco_medio = (
-                (quantidade_antiga * preco_medio_antigo) +
-                (quantidade_nova * preco_novo)
-            ) / (quantidade_antiga + quantidade_nova)
-
-            df_produtos.loc[indice, "quantidade_total_comprada"] = quantidade_antiga + quantidade_nova
-            df_produtos.loc[indice, "preco_medio"] = novo_preco_medio
-
-            if pd.isna(df_produtos.loc[indice, "ultima_compra"]) or data_nova > df_produtos.loc[indice, "ultima_compra"]:
-                df_produtos.loc[indice, "ultimo_preco"] = preco_novo
-                df_produtos.loc[indice, "ultima_compra"] = data_nova
-
-        else:
-            df_produtos.loc[len(df_produtos)] = {
-                "codigo": item["codigo"],
-                "nome_produto": item["nome_produto"],
-                "quantidade_total_comprada": quantidade_nova,
-                "preco_medio": preco_novo,
-                "ultimo_preco": preco_novo,
-                "ultima_compra": data_nova,
-                "chave_nota": chave_nota
-            }
-
-    # 🔥 Remover timezone das datas ANTES de salvar
-    for col in df_produtos.columns:
-        if isinstance(df_produtos[col].dtype, DatetimeTZDtype):
-            df_produtos[col] = df_produtos[col].dt.tz_localize(None)
-
-    df_produtos.to_excel(nome_excel, index=False)
-    print("Excel atualizado:", nome_excel)
-
-# ----------------------------------------------------------
-# Ler todas as notas da pasta
-# ----------------------------------------------------------
-def ler_todas_notas(pasta):
+def ler_todas_notas(pasta="notas"):
     for arquivo in os.listdir(pasta):
         if arquivo.endswith(".xml"):
             caminho = os.path.join(pasta, arquivo)
-            print("Lendo:", arquivo)
 
+            log(f"Lendo {arquivo}...")
             produtos, chave = ler_xml(caminho)
+
             if chave:
                 atualizar_excel_compras(produtos, chave)
             else:
-                print("Chave da nota não encontrada. Nota ignorada.")
+                log_erro(f"Nota ignorada: {arquivo}")
 
 
 if __name__ == "__main__":
-    pasta_notas = "notas"
-    ler_todas_notas(pasta_notas)
+    ler_todas_notas("notas")

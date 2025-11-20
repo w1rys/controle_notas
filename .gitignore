@@ -1,0 +1,58 @@
+# --- AMBIENTE VIRTUAL ---
+venv/
+.env/
+.env.bak
+*.env
+
+# --- PYTHON ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.pkl
+*.log
+
+# --- MACOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# --- EXCEL ---
+*.xlsx~
+*.xlsm~
+*.xlsb~
+~$*.xlsx
+~$*.xls
+*.tmp
+*.bak
+
+# Arquivo Excel gerado pelo sistema (não versionar)
+produtos.xlsx
+
+# --- NOTAS FISCAIS XML ---
+notas_processadas/
+notas_invalidas/
+
+# Se quiser ignorar as notas de entrada também (opcional)
+# notas/
+
+# --- FERRAMENTAS ---
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# --- CACHE / BUILD ---
+dist/
+build/
+*.spec
+
+# --- ARQUIVOS DE SISTEMA ---
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# --- OUTROS ---
+*.cache
+*.backup
