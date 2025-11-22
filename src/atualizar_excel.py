@@ -90,35 +90,47 @@ def atualizar_aba_produtos(df_produtos, nome_excel="produtos.xlsx"):
     ABA "Produtos":
     - codigo
     - nome_produto
+    - ultima_compra (datetime sem hora no Excel)
     - ultimo_preco
     - penultimo_preco
-    - preco_venda (manual)
+    - preco_venda
     """
 
+    # Garantir datetime sem timezone e sem hora
+    if "ultima_compra" in df_produtos.columns:
+        df_produtos["ultima_compra"] = (
+            pd.to_datetime(df_produtos["ultima_compra"], errors="coerce")
+            .dt.tz_localize(None)
+            .dt.normalize()     # <<< Remove hora
+        )
+
+    # Ordem das colunas
     df_base = df_produtos[[
         "codigo",
         "nome_produto",
+        "ultima_compra",
         "ultimo_preco",
         "penultimo_preco"
     ]].copy()
 
-    # preencher penúltimo preço caso esteja vazio
+    # Preencher penúltimo preço quando necessário
     df_base["penultimo_preco"] = df_base.apply(
-        lambda row: row["ultimo_preco"] if pd.isna(row["penultimo_preco"]) else row["penultimo_preco"],
+        lambda row: row["ultimo_preco"]
+        if pd.isna(row["penultimo_preco"]) else row["penultimo_preco"],
         axis=1
     )
 
-    df_base = df_base.sort_values(by="nome_produto", ascending=True)
+    # Ordenar alfabeticamente
+    df_base = df_base.sort_values(by="nome_produto")
 
     aba = "Produtos"
 
     try:
         book = load_workbook(nome_excel)
 
-        # Preservar preco_venda existente
+        # Preservar preco_venda
         if aba in book.sheetnames:
             antigo = pd.read_excel(nome_excel, sheet_name=aba)
-
             if "preco_venda" in antigo.columns:
                 df_base = df_base.merge(
                     antigo[["codigo", "preco_venda"]],
@@ -130,6 +142,7 @@ def atualizar_aba_produtos(df_produtos, nome_excel="produtos.xlsx"):
         else:
             df_base["preco_venda"] = None
 
+        # Escrever a aba
         with pd.ExcelWriter(
             nome_excel,
             engine="openpyxl",
@@ -138,11 +151,39 @@ def atualizar_aba_produtos(df_produtos, nome_excel="produtos.xlsx"):
         ) as writer:
             df_base.to_excel(writer, sheet_name=aba, index=False)
 
+        # ---------------------------
+        # FORMATAÇÃO DA DATA NO EXCEL
+        # ---------------------------
+        book = load_workbook(nome_excel)
+        ws = book[aba]
+
+        COL_DATA = 3  # código=1, nome=2, data=3
+
+        for row in range(2, ws.max_row + 1):
+            cell = ws.cell(row=row, column=COL_DATA)
+            cell.number_format = "DD/MM/YYYY"   # <<< sem hora
+
+        book.save(nome_excel)
+
     except FileNotFoundError:
         df_base["preco_venda"] = None
-        df_base.to_excel(nome_excel, sheet_name=aba, index=False)
 
+        with pd.ExcelWriter(
+            nome_excel,
+            engine="openpyxl",
+            mode="w"
+        ) as writer:
+            df_base.to_excel(writer, sheet_name=aba, index=False)
 
+        # Format after creating
+        book = load_workbook(nome_excel)
+        ws = book[aba]
+
+        for row in range(2, ws.max_row + 1):
+            cell = ws.cell(row=row, column=3)
+            cell.number_format = "DD/MM/YYYY"
+
+        book.save(nome_excel)
 # ----------------------------------------------------------
 # Atualizar Excel após leitura da nota
 # ----------------------------------------------------------
@@ -158,42 +199,60 @@ def atualizar_excel_compras(novos_produtos, chave_nota, nome_excel="produtos.xls
         codigo = item["codigo"]
         qtd_nova = item["quantidade"]
         preco_novo = item["preco_unitario"]
-        data_nova = item["data_compra"]
+        data_nova = pd.to_datetime(item["data_compra"]).tz_localize(None)
 
+        # Verificar se produto já existe
         existente = df[df["codigo"] == codigo]
 
         if not existente.empty:
             idx = existente.index[0]
 
+            # Quantidade acumulada
             qtd_antiga = df.loc[idx, "quantidade_total_comprada"]
-            total_qtd = qtd_antiga + qtd_nova
+            df.loc[idx, "quantidade_total_comprada"] = qtd_antiga + qtd_nova
 
-            df.loc[idx, "quantidade_total_comprada"] = total_qtd
+            # Data registrada atualmente
+            data_atual = df.loc[idx, "ultima_compra"]
+            data_atual = pd.to_datetime(data_atual) if not pd.isna(data_atual) else None
 
-            # Penúltimo preço
-            ultimo_antigo = df.loc[idx, "ultimo_preco"]
+            # ----------------------------------------------------------
+            # ATUALIZAÇÃO BASEADA NA DATA DA NOTA (CORRETO!)
+            # ----------------------------------------------------------
 
-            if pd.isna(df.loc[idx, "penultimo_preco"]) or df.loc[idx, "penultimo_preco"] in [None, 0]:
+            # Se a nota nova for mais RECENTE
+            if data_atual is None or data_nova > data_atual:
+
+                # penúltimo preço recebe o último
+                ultimo_antigo = df.loc[idx, "ultimo_preco"]
                 df.loc[idx, "penultimo_preco"] = ultimo_antigo
+
+                # último preço recebe o novo valor
+                df.loc[idx, "ultimo_preco"] = preco_novo
+
+                # data da última compra atualizada
+                df.loc[idx, "ultima_compra"] = data_nova
+
             else:
-                df.loc[idx, "penultimo_preco"] = ultimo_antigo
-
-            # Último preço
-            df.loc[idx, "ultimo_preco"] = preco_novo
-            df.loc[idx, "ultima_compra"] = data_nova
+                # Nota antiga → não altera preços
+                log(f"[INFO] Nota antiga detectada para {codigo}: preço não atualizado.")
 
         else:
+            # Produto NOVO → cadastra tudo
             df.loc[len(df)] = {
                 "codigo": codigo,
                 "nome_produto": item["nome_produto"],
                 "quantidade_total_comprada": qtd_nova,
                 "ultimo_preco": preco_novo,
-                "penultimo_preco": preco_novo,  # agora sempre recebe último
+                "penultimo_preco": preco_novo,
                 "ultima_compra": data_nova,
                 "chave_nota": chave_nota
             }
 
+    # ordenar alfabeticamente
     df = df.sort_values(by="nome_produto", ascending=True)
 
+    # salvar Excel
     salvar_excel(df, nome_excel)
+
+    # atualizar aba Produtos com datetime real
     atualizar_aba_produtos(df, nome_excel)
