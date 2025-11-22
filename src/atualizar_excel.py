@@ -119,48 +119,71 @@ def salvar_excel(df_produtos, nome_excel):
 # GERAR ABA "PRODUTOS"
 # ===========================================================
 def atualizar_aba_produtos(df_produtos, nome_excel="produtos.xlsx"):
-
-    df_produtos["ultima_compra"] = (
-        pd.to_datetime(df_produtos["ultima_compra"], errors="coerce")
-        .dt.tz_localize(None)
-        .dt.normalize()
-    )
-
-    df_produtos = df_produtos.fillna("")
-
-    df_base = df_produtos[[
-        "codigo",
-        "nome_produto",
-        "ultima_compra",
-        "ultimo_preco",
-        "penultimo_preco"
-    ]]
-
-    df_base = df_base.sort_values(by="nome_produto")
-
-    aba = "Produtos"
+    from openpyxl import load_workbook
 
     try:
-        book = load_workbook(nome_excel)
+        # Normaliza datas, removendo timezone e hora
+        df_produtos["ultima_compra"] = (
+            pd.to_datetime(df_produtos["ultima_compra"], errors="coerce")
+            .dt.tz_localize(None)
+            .dt.normalize()
+        )
 
-        # preservar preco_venda
-        if aba in book.sheetnames:
-            antigo = pd.read_excel(nome_excel, sheet_name=aba)
-            if "preco_venda" in antigo.columns:
-                df_base = df_base.merge(
-                    antigo[["codigo", "preco_venda"]], on="codigo", how="left"
-                )
+        # Preenche N/A
+        df_produtos = df_produtos.fillna("")
+
+        # Base padronizada
+        df_base = df_produtos[[
+            "codigo",
+            "nome_produto",
+            "ultima_compra",
+            "ultimo_preco",
+            "penultimo_preco"
+        ]]
+
+        # Ordena alfabeticamente
+        df_base = df_base.sort_values(by="nome_produto")
+
+        # ---- CORREÇÃO DO BUG ----
+        # Carrega Excel para obter preco_venda (se existir)
+        try:
+            book = load_workbook(nome_excel)
+            if "Produtos" in book.sheetnames:
+                antigo = pd.read_excel(nome_excel, sheet_name="Produtos")
+
+                # Se preco_venda existe, fazemos merge sem perder produtos
+                if "preco_venda" in antigo.columns:
+                    df_base = df_base.merge(
+                        antigo[["codigo", "preco_venda"]],
+                        on="codigo",
+                        how="left"  # <-- mantém TODOS os produtos do novo df
+                    )
+                else:
+                    df_base["preco_venda"] = ""
+
             else:
                 df_base["preco_venda"] = ""
-        else:
+
+        except Exception:
             df_base["preco_venda"] = ""
 
-        with pd.ExcelWriter(
-            nome_excel, engine="openpyxl", mode="a", if_sheet_exists="replace"
-        ) as writer:
-            df_base.to_excel(writer, sheet_name=aba, index=False)
+        # Remove duplicados caso existam
+        df_base = df_base.drop_duplicates(subset=["codigo"])
 
-        ws = book[aba]
+        # --- SALVA A ABA PRODUTOS ---
+        with pd.ExcelWriter(
+            nome_excel,
+            engine="openpyxl",
+            mode="a",
+            if_sheet_exists="replace"
+        ) as writer:
+            df_base.to_excel(writer, sheet_name="Produtos", index=False)
+
+        # --- FORMATA A COLUNA DE DATA ---
+        book = load_workbook(nome_excel)
+        ws = book["Produtos"]
+
+        # Coluna "ultima_compra" é a 3ª coluna
         for row in range(2, ws.max_row + 1):
             ws.cell(row=row, column=3).number_format = "DD/MM/YYYY"
 
@@ -168,7 +191,6 @@ def atualizar_aba_produtos(df_produtos, nome_excel="produtos.xlsx"):
 
     except Exception as e:
         log_erro(f"Erro ao atualizar aba Produtos: {e}")
-
 
 # ===========================================================
 # FUNÇÃO PRINCIPAL
