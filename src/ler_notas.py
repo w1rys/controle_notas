@@ -1,4 +1,5 @@
 import os
+import re
 import xmltodict
 from utils import (
     log,
@@ -10,19 +11,24 @@ from utils import (
 from atualizar_excel import atualizar_excel_compras
 
 
-# ----------------------------------------------------------
-# Ler uma nota XML e extrair produtos
-# ----------------------------------------------------------
-def ler_xml(path_xml):
-    """
-    Lê um XML de NF-e, extrai:
-    - chave da nota
-    - data da compra
-    - itens
-    E retorna: (lista_produtos, chave_nota)
-    """
+def limpar_nome_emitente(nome):
+    # remove caracteres especiais e deixa só letras/numeros/espaço
+    nome_limpo = re.sub(r"[^A-Za-z0-9 ]+", "", nome).strip().upper()
 
-    # Ler arquivo XML
+    # separa por espaço
+    partes = nome_limpo.split()
+
+    # pega somente as DUAS primeiras palavras
+    if len(partes) >= 2:
+        nome_duas = f"{partes[0]}_{partes[1]}"
+    else:
+        nome_duas = partes[0]
+
+    return nome_duas
+
+
+def ler_xml(path_xml):
+
     try:
         with open(path_xml, encoding="utf-8") as f:
             xml = f.read()
@@ -30,48 +36,34 @@ def ler_xml(path_xml):
         log_erro(f"Erro ao abrir arquivo {path_xml}: {e}")
         return [], None
 
-    # Interpretar XML
     try:
         data = xmltodict.parse(xml)
     except Exception as e:
         log_erro(f"Erro ao interpretar XML {path_xml}: {e}")
         return [], None
 
-    # Validar estrutura
+    # validar xml
     if not validar_nota_nfe(data):
         log_erro(f"Arquivo ignorado (não é NF-e): {path_xml}")
         return [], None
 
-    # Acessar bloco principal da NF-e
-    try:
-        inf = data["nfeProc"]["NFe"]["infNFe"]
-    except:
-        try:
-            inf = data["NFe"]["infNFe"]
-        except:
-            log_erro(f"NF-e com estrutura inválida: {path_xml}")
-            return [], None
-
-    # ===============================
-    # Extrair chave da nota
-    # ===============================
+    inf = data["nfeProc"]["NFe"]["infNFe"]
     chave = extrair_chave_nota(inf)
+
     if not chave:
-        log_erro(f"Chave da nota não encontrada: {path_xml}")
+        log_erro(f"Chave não encontrada: {path_xml}")
         return [], None
 
-    # ===============================
-    # Extrair data de emissão
-    # ===============================
     data_emissao = extrair_data_nota(
-        inf.get("ide", {}).get("dhEmi") or inf.get("ide", {}).get("dEmi")
+        inf["ide"].get("dhEmi") or inf["ide"].get("dEmi")
     )
 
-    # ===============================
-    # Extrair lista de itens
-    # ===============================
+    emitente = inf["emit"]["xNome"].strip()
+    emitente_norm = limpar_nome_emitente(emitente)
+
+    # itens
     itens = inf["det"]
-    if isinstance(itens, dict):  # Se tiver apenas 1 item
+    if isinstance(itens, dict):
         itens = [itens]
 
     produtos = []
@@ -79,36 +71,32 @@ def ler_xml(path_xml):
     for item in itens:
         prod = item["prod"]
 
+        codigo_prod = str(prod.get("cProd", "")).strip()
+
+        # código final: DUAS PRIMEIRAS PALAVRAS DO FORNECEDOR
+        codigo = f"{emitente_norm}-{codigo_prod}"
+
         produtos.append({
-            "codigo": str(prod.get("cProd", "")).strip(),
+            "codigo": codigo,
             "nome_produto": prod.get("xProd", "").strip(),
             "quantidade": float(prod.get("qCom", 0)),
             "preco_unitario": float(prod.get("vUnCom", 0)),
             "data_compra": data_emissao,
-            "chave_nota": chave
+            "chave_nota": chave,
+            "emitente": emitente
         })
 
     log(f"Nota processada: {os.path.basename(path_xml)}")
-
     return produtos, chave
 
 
-# ----------------------------------------------------------
-# Ler toda a pasta "notas" (modo manual, sem monitor)
-# ----------------------------------------------------------
 def ler_todas_notas(pasta="notas"):
     for arquivo in os.listdir(pasta):
         if arquivo.endswith(".xml"):
             caminho = os.path.join(pasta, arquivo)
-
-            log(f"Lendo {arquivo}...")
             produtos, chave = ler_xml(caminho)
 
             if chave:
                 atualizar_excel_compras(produtos, chave)
             else:
                 log_erro(f"Nota ignorada: {arquivo}")
-
-
-if __name__ == "__main__":
-    ler_todas_notas("notas")
